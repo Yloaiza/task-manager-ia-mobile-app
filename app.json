@@ -8,7 +8,12 @@
     "scheme": "taskmanagermobile",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./assets/expo.icon",
+      "bundleIdentifier": "com.anonymous.task-manager-mobile",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Esta app necesita acceso al microfono para crear tareas por voz.",
+        "NSSpeechRecognitionUsageDescription": "Esta app usa reconocimiento de voz para transcribir tus tareas."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -17,7 +22,12 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "RECORD_AUDIO",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "package": "com.anonymous.taskmanagermobile"
     },
     "web": {
       "output": "static",
@@ -32,7 +42,9 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
-      ]
+      ],
+      "@react-native-voice/voice",
+      "expo-build-properties"
     ],
     "experiments": {
       "typedRoutes": true,
