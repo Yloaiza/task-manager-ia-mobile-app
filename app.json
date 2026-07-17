@@ -43,12 +43,25 @@
           "imageWidth": 76
         }
       ],
-      "@react-native-voice/voice",
+      [
+  "expo-speech-recognition",
+  {
+    "microphonePermission": "Esta app necesita acceso al microfono para crear tareas por voz.",
+    "speechRecognitionPermission": "Esta app usa reconocimiento de voz para transcribir tus tareas.",
+    "androidSpeechServicePackages": ["com.google.android.googlequicksearchbox"]
+  }
+],
       "expo-build-properties"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "63015918-eb70-40f9-a80d-26c93ff05349"
+      }
     }
   }
 }

@@ -4,7 +4,6 @@
   "version": "1.0.0",
   "dependencies": {
     "@expo/ui": "~57.0.4",
-    "@react-native-voice/voice": "^3.2.4",
     "expo": "~57.0.4",
     "expo-build-properties": "~57.0.5",
     "expo-constants": "~57.0.5",
@@ -16,6 +15,7 @@
     "expo-linking": "~57.0.2",
     "expo-notifications": "~57.0.5",
     "expo-router": "~57.0.4",
+    "expo-speech-recognition": "^56.0.1",
     "expo-splash-screen": "~57.0.2",
     "expo-status-bar": "~57.0.0",
     "expo-symbols": "~57.0.0",

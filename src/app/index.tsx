@@ -1,5 +1,4 @@
-import React, { useState, useEffect } from 'react';
-import { requestNotificationPermissions, scheduleTaskReminder } from '../utils/notifications';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   SafeAreaView,
   View,
@@ -10,13 +9,30 @@ import {
   StyleSheet,
   ActivityIndicator,
   Alert,
+  Animated,
+  Easing,
+  StatusBar,
 } from 'react-native';
-import Voice, {
-  SpeechResultsEvent,
-  SpeechErrorEvent,
-} from '@react-native-voice/voice';
+import {
+  ExpoSpeechRecognitionModule,
+  useSpeechRecognitionEvent,
+} from 'expo-speech-recognition';
+import { requestNotificationPermissions, scheduleTaskReminder } from '../utils/notifications';
 
 const API_URL = 'http://localhost:8080';
+const SILENCE_TIMEOUT_MS = 1500;
+
+const colors = {
+  bg: '#0B0B0C',
+  surface: '#17171A',
+  border: '#242427',
+  text: '#EDEDED',
+  textMuted: '#8A8A8D',
+  accent: '#E4B463',
+  dificil: '#C2645C',
+  media: '#E4B463',
+  facil: '#7FA88A',
+};
 
 type Task = {
   id: number;
@@ -27,58 +43,89 @@ type Task = {
   completed: boolean;
 };
 
-export default function App() {
-  const [text, setText] = useState('');
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [isListening, setIsListening] = useState(false);
+type Status = 'idle' | 'listening' | 'submitting';
 
-  useEffect(() => {
-    Voice.onSpeechResults = (event: SpeechResultsEvent) => {
-      if (event.value && event.value.length > 0) {
-        setText(event.value[0]);
-      }
-    };
-
-    Voice.onSpeechError = (event: SpeechErrorEvent) => {
-      console.error('Error de voz:', event.error);
-      setIsListening(false);
-    };
-
-    Voice.onSpeechEnd = () => {
-      setIsListening(false);
-    };
-
-    return () => {
-      Voice.destroy().then(Voice.removeAllListeners);
-    };
-  }, []);
-
-const startListening = async () => {
-  try {
-    await Voice.stop();
-    await Voice.destroy();
-  } catch (e) {
-
-  }
-
-  try {
-    setText('');
-    setIsListening(true);
-    await Voice.start('es-CO');
-  } catch (error) {
-    console.error('Error al iniciar reconocimiento:', error);
-    setIsListening(false);
-  }
+const difficultyColor = (d: string) => {
+  if (d === 'dificil') return colors.dificil;
+  if (d === 'facil') return colors.facil;
+  return colors.media;
 };
 
-  const stopListening = async () => {
-    try {
-      await Voice.stop();
-      setIsListening(false);
-    } catch (error) {
-      console.error('Error al detener reconocimiento:', error);
+const todayLabel = () => {
+  const d = new Date();
+  return d.toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long' });
+};
+
+export default function App() {
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [status, setStatus] = useState<Status>('idle');
+  const [transcript, setTranscript] = useState('');
+  const [showManualInput, setShowManualInput] = useState(false);
+  const [manualText, setManualText] = useState('');
+
+  const transcriptRef = useRef('');
+  const silenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ring1 = useRef(new Animated.Value(0)).current;
+  const ring2 = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    requestNotificationPermissions();
+    fetchTasks();
+  }, []);
+
+  useSpeechRecognitionEvent('result', (event) => {
+    if (event.results && event.results.length > 0) {
+      const text = event.results[0].transcript;
+      transcriptRef.current = text;
+      setTranscript(text);
+      resetSilenceTimer();
     }
+  });
+
+  useSpeechRecognitionEvent('error', (event) => {
+    console.log('Error de voz:', event.error, event.message);
+    setStatus('idle');
+  });
+
+  useSpeechRecognitionEvent('end', () => {
+    submitFromVoice();
+  });
+
+  useEffect(() => {
+    if (status === 'listening') {
+      const pulse = (val: Animated.Value, delay: number) =>
+        Animated.loop(
+          Animated.sequence([
+            Animated.delay(delay),
+            Animated.timing(val, {
+              toValue: 1,
+              duration: 1400,
+              easing: Easing.out(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(val, { toValue: 0, duration: 0, useNativeDriver: true }),
+          ])
+        );
+      const a1 = pulse(ring1, 0);
+      const a2 = pulse(ring2, 700);
+      a1.start();
+      a2.start();
+      return () => {
+        a1.stop();
+        a2.stop();
+        ring1.setValue(0);
+        ring2.setValue(0);
+      };
+    }
+  }, [status]);
+
+  const resetSilenceTimer = () => {
+    if (silenceTimer.current) {
+      clearTimeout(silenceTimer.current);
+    }
+    silenceTimer.current = setTimeout(() => {
+      stopListening();
+    }, SILENCE_TIMEOUT_MS);
   };
 
   const fetchTasks = async () => {
@@ -88,145 +135,353 @@ const startListening = async () => {
       setTasks(data);
     } catch (error) {
       console.error('Error al traer tareas:', error);
-      Alert.alert('Error', 'No se pudo conectar con el backend.');
     }
   };
 
-  useEffect(() => {
-    fetchTasks();
-  }, []);
-  
-useEffect(() => {
-  requestNotificationPermissions();
-}, []);
-const handleSubmit = async () => {
-  if (!text.trim()) return;
+  const processVoiceCommand = async (text: string) => {
+    if (!text.trim()) {
+      setStatus('idle');
+      return;
+    }
+    setStatus('submitting');
+    try {
+      const response = await fetch(`${API_URL}/api/tasks/voice-command`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!response.ok) throw new Error('Error en la respuesta del servidor');
 
-  setLoading(true);
-  try {
-    const response = await fetch(`${API_URL}/api/tasks/from-text`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      const result = await response.json();
+
+      if (result.action === 'create' && result.task?.dueDate) {
+        await scheduleTaskReminder(
+          result.task.title,
+          result.task.subject,
+          new Date(result.task.dueDate)
+        );
+      }
+
+      await fetchTasks();
+    } catch (error) {
+      console.error('Error al procesar comando:', error);
+      Alert.alert('No se pudo procesar', 'Revisa la conexion con el backend.');
+    } finally {
+      setStatus('idle');
+      setTranscript('');
+      transcriptRef.current = '';
+      setManualText('');
+    }
+  };
+
+  const submitFromVoice = () => {
+    if (silenceTimer.current) {
+      clearTimeout(silenceTimer.current);
+      silenceTimer.current = null;
+    }
+    const finalText = transcriptRef.current;
+    if (finalText.trim()) {
+      processVoiceCommand(finalText);
+    } else {
+      setStatus('idle');
+    }
+  };
+
+  const startListening = async () => {
+    const result = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+    if (!result.granted) {
+      Alert.alert('Permiso necesario', 'Activa el permiso de microfono en Ajustes.');
+      return;
+    }
+    transcriptRef.current = '';
+    setTranscript('');
+    setStatus('listening');
+    ExpoSpeechRecognitionModule.start({
+      lang: 'es-CO',
+      interimResults: true,
+      continuous: false,
     });
+    resetSilenceTimer();
+  };
 
-    if (!response.ok) {
-      throw new Error('Error en la respuesta del servidor');
+  const stopListening = () => {
+    if (silenceTimer.current) {
+      clearTimeout(silenceTimer.current);
+      silenceTimer.current = null;
     }
+    ExpoSpeechRecognitionModule.stop();
+  };
 
-    const createdTask = await response.json();
+  const statusLabel = () => {
+    if (status === 'listening') return transcript || 'Escuchando…';
+    if (status === 'submitting') return 'Creando tarea…';
+    return 'Toca para hablar';
+  };
 
-    if (createdTask.dueDate) {
-      await scheduleTaskReminder(
-        createdTask.title,
-        createdTask.subject,
-        new Date(createdTask.dueDate)
-      );
+  const ringStyle = (val: Animated.Value) => ({
+    opacity: val.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0] }),
+    transform: [
+      { scale: val.interpolate({ inputRange: [0, 1], outputRange: [1, 1.9] }) },
+    ],
+  });
+
+  const toggleComplete = async (id: number) => {
+    try {
+      await fetch(`${API_URL}/api/tasks/${id}/toggle-complete`, {
+        method: 'PATCH',
+      });
+      await fetchTasks();
+    } catch (error) {
+      console.error('Error al actualizar tarea:', error);
     }
-
-    setText('');
-    await fetchTasks();
-  } catch (error) {
-    console.error('Error al crear tarea:', error);
-    Alert.alert('Error', 'No se pudo crear la tarea.');
-  } finally {
-    setLoading(false);
-  }
-};
+  };
 
   return (
     <SafeAreaView style={styles.container}>
-      <Text style={styles.header}>Task Manager IA</Text>
+      <StatusBar barStyle="light-content" />
 
-      <TextInput
-        style={styles.input}
-        placeholder="Ej: Tengo examen de calculo el 20, es dificil"
-        value={text}
-        onChangeText={setText}
-        multiline
-      />
+      <View style={styles.header}>
+        <Text style={styles.eyebrow}>TASK MANAGER</Text>
+        <Text style={styles.dateLabel}>{todayLabel()}</Text>
+      </View>
 
-      <TouchableOpacity
-        style={[styles.micButton, isListening && styles.micButtonActive]}
-        onPress={isListening ? stopListening : startListening}
-      >
-        <Text style={styles.micButtonText}>
-          {isListening ? '🔴 Escuchando... (toca para detener)' : '🎤 Hablar'}
+      <View style={styles.micSection}>
+        <View style={styles.micWrapper}>
+          <Animated.View style={[styles.ring, ringStyle(ring1)]} />
+          <Animated.View style={[styles.ring, ringStyle(ring2)]} />
+          <TouchableOpacity
+            style={[styles.micButton, status === 'listening' && styles.micButtonActive]}
+            onPress={status === 'listening' ? stopListening : startListening}
+            disabled={status === 'submitting'}
+            activeOpacity={0.85}
+          >
+            {status === 'submitting' ? (
+              <ActivityIndicator color={colors.bg} />
+            ) : (
+              <View style={[styles.micDot, status === 'listening' && styles.micDotActive]} />
+            )}
+          </TouchableOpacity>
+        </View>
+        <Text style={styles.statusText} numberOfLines={2}>
+          {statusLabel()}
         </Text>
-      </TouchableOpacity>
 
-      <TouchableOpacity style={styles.button} onPress={handleSubmit} disabled={loading}>
-        {loading ? (
-          <ActivityIndicator color="#fff" />
-        ) : (
-          <Text style={styles.buttonText}>Crear tarea</Text>
+        <TouchableOpacity onPress={() => setShowManualInput((v) => !v)}>
+          <Text style={styles.manualToggle}>
+            {showManualInput ? 'Ocultar' : 'Escribir en su lugar'}
+          </Text>
+        </TouchableOpacity>
+
+        {showManualInput && (
+          <View style={styles.manualRow}>
+            <TextInput
+              style={styles.manualInput}
+              placeholder="Ej: examen de calculo el 20, dificil"
+              placeholderTextColor={colors.textMuted}
+              value={manualText}
+              onChangeText={setManualText}
+              multiline
+            />
+            <TouchableOpacity
+              style={styles.sendButton}
+              onPress={() => processVoiceCommand(manualText)}
+              disabled={status === 'submitting'}
+            >
+              <Text style={styles.sendButtonText}>→</Text>
+            </TouchableOpacity>
+          </View>
         )}
-      </TouchableOpacity>
+      </View>
+
+      <View style={styles.listHeader}>
+        <Text style={styles.eyebrow}>TAREAS · {tasks.length}</Text>
+      </View>
 
       <FlatList
         style={styles.list}
+        contentContainerStyle={styles.listContent}
         data={tasks}
         keyExtractor={(item) => item.id.toString()}
         renderItem={({ item }) => (
-          <View style={styles.taskCard}>
-            <Text style={styles.taskTitle}>{item.title}</Text>
-            <Text style={styles.taskDetail}>Materia: {item.subject || 'N/A'}</Text>
-            <Text style={styles.taskDetail}>Dificultad: {item.difficulty}</Text>
-            {item.dueDate && (
-              <Text style={styles.taskDetail}>
-                Fecha: {new Date(item.dueDate).toLocaleDateString('es-CO')}
+          <TouchableOpacity
+            style={styles.taskRow}
+            onPress={() => toggleComplete(item.id)}
+            activeOpacity={0.6}
+          >
+            <View
+              style={[
+                styles.dot,
+                { backgroundColor: item.completed ? colors.textMuted : difficultyColor(item.difficulty) },
+              ]}
+            />
+            <View style={styles.taskTextBlock}>
+              <Text style={[styles.taskTitle, item.completed && styles.taskTitleDone]}>
+                {item.title}
               </Text>
-            )}
-          </View>
+              <Text style={styles.taskMeta}>
+                {item.subject || 'Sin materia'}
+                {item.dueDate
+                  ? ` · ${new Date(item.dueDate).toLocaleDateString('es-CO', {
+                      day: 'numeric',
+                      month: 'short',
+                    })}`
+                  : ''}
+              </Text>
+            </View>
+            {item.completed && <Text style={styles.checkMark}>✓</Text>}
+          </TouchableOpacity>
         )}
-        ListEmptyComponent={<Text style={styles.empty}>No hay tareas todavia</Text>}
+        ListEmptyComponent={
+          <Text style={styles.empty}>Todavia no hay tareas. Toca el microfono para crear una.</Text>
+        }
       />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f5f5f5', padding: 16 },
-  header: { fontSize: 24, fontWeight: 'bold', marginBottom: 16, marginTop: 20 },
-  input: {
-    backgroundColor: '#fff',
-    borderRadius: 8,
-    padding: 12,
-    minHeight: 60,
-    fontSize: 16,
+  container: { flex: 1, backgroundColor: colors.bg },
+  header: {
+    paddingHorizontal: 24,
+    paddingTop: 12,
+    paddingBottom: 8,
+  },
+  eyebrow: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 2,
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+  },
+  dateLabel: {
+    fontSize: 20,
+    fontWeight: '600',
+    color: colors.text,
+    marginTop: 4,
+    textTransform: 'capitalize',
+  },
+  micSection: {
+    alignItems: 'center',
+    paddingVertical: 28,
+  },
+  micWrapper: {
+    width: 128,
+    height: 128,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  ring: {
+    position: 'absolute',
+    width: 96,
+    height: 96,
+    borderRadius: 48,
     borderWidth: 1,
-    borderColor: '#ddd',
+    borderColor: colors.accent,
   },
   micButton: {
-    backgroundColor: '#e0e7ff',
-    borderRadius: 8,
-    padding: 14,
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
     alignItems: 'center',
-    marginTop: 12,
+    justifyContent: 'center',
   },
   micButtonActive: {
-    backgroundColor: '#fee2e2',
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
   },
-  micButtonText: { fontSize: 16, fontWeight: '600', color: '#333' },
-  button: {
-    backgroundColor: '#4f46e5',
-    borderRadius: 8,
-    padding: 14,
-    alignItems: 'center',
-    marginTop: 12,
-    marginBottom: 20,
+  micDot: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: colors.textMuted,
   },
-  buttonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
-  list: { flex: 1 },
-  taskCard: {
-    backgroundColor: '#fff',
-    borderRadius: 8,
-    padding: 14,
-    marginBottom: 10,
+  micDotActive: {
+    backgroundColor: colors.bg,
+    width: 16,
+    height: 16,
+    borderRadius: 4,
+  },
+  statusText: {
+    marginTop: 16,
+    fontSize: 15,
+    color: colors.text,
+    textAlign: 'center',
+    paddingHorizontal: 32,
+  },
+  manualToggle: {
+    marginTop: 14,
+    fontSize: 13,
+    color: colors.textMuted,
+    textDecorationLine: 'underline',
+  },
+  manualRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    marginTop: 16,
+    paddingHorizontal: 24,
+    width: '100%',
+    gap: 8,
+  },
+  manualInput: {
+    flex: 1,
+    backgroundColor: colors.surface,
     borderWidth: 1,
-    borderColor: '#eee',
+    borderColor: colors.border,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    color: colors.text,
+    fontSize: 15,
+    minHeight: 44,
   },
-  taskTitle: { fontSize: 16, fontWeight: 'bold' },
-  taskDetail: { fontSize: 14, color: '#555', marginTop: 2 },
-  empty: { textAlign: 'center', color: '#999', marginTop: 40 },
+  sendButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 10,
+    backgroundColor: colors.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sendButtonText: { fontSize: 20, fontWeight: '700', color: colors.bg },
+  listHeader: {
+    paddingHorizontal: 24,
+    paddingTop: 8,
+    paddingBottom: 4,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    marginTop: 4,
+  },
+  list: { flex: 1 },
+  listContent: { paddingHorizontal: 24, paddingBottom: 24 },
+  taskRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    gap: 12,
+  },
+  dot: { width: 6, height: 6, borderRadius: 3, marginTop: 7 },
+  taskTextBlock: { flex: 1 },
+  taskTitle: { fontSize: 15, fontWeight: '600', color: colors.text },
+  taskMeta: { fontSize: 13, color: colors.textMuted, marginTop: 2 },
+  empty: {
+    textAlign: 'center',
+    color: colors.textMuted,
+    marginTop: 40,
+    fontSize: 14,
+    paddingHorizontal: 32,
+  },
+  taskTitleDone: {
+    textDecorationLine: 'line-through',
+    color: colors.textMuted,
+  },
+  checkMark: {
+    fontSize: 16,
+    color: colors.facil,
+    marginLeft: 8,
+  },
 });
